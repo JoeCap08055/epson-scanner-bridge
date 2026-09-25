@@ -67,6 +67,58 @@ bool ensure_dat_file(std::string& err)
     return true;
 }
 
+// es2netif's main() starts with fopen(NETIF_DEBUG_LOG, "a") and writes to the
+// result without checking for NULL (confirmed by disassembly), so if it can't
+// open the file it segfaults before printing its port. On systems with
+// fs.protected_regular (Ubuntu sets it to 2), an O_CREAT open of an existing
+// file in /tmp fails with EACCES, even for root, unless the opener owns the
+// file or the file belongs to /tmp's owner (root). So a trace left by one user
+// crashes every other user's es2netif. Try the same open first:
+//   - as root: if blocked, remove the file (when cleanup is allowed), and
+//     make our own copy 0666, so it is root-owned and every user can use it;
+//   - otherwise: fail with an error that says how to fix it.
+bool prepare_debug_log(bool cleanup, std::string& err)
+{
+    const char* path = NETIF_DEBUG_LOG;
+    const int flags = O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC;
+    const bool root = geteuid() == 0;
+
+    int fd = ::open(path, flags, 0666);
+    if (fd < 0 && errno == EACCES && root && cleanup) {
+        struct stat st;
+        if (lstat(path, &st) == 0) {
+            LOG_WARN("removing %s (owned by uid %u): es2netif cannot append to another user's file there "
+                     "(fs.protected_regular) and would crash", path, static_cast<unsigned>(st.st_uid));
+        }
+        if (::unlink(path) == 0 || errno == ENOENT) {
+            fd = ::open(path, flags | O_EXCL, 0666);
+        }
+    }
+    if (fd < 0) {
+        int open_errno = errno;
+        err = std::string("es2netif would crash on startup: it cannot open its debug log ") + path +
+              " (" + std::strerror(open_errno) + ")";
+        struct stat st;
+        if (lstat(path, &st) == 0 && st.st_uid != geteuid()) {
+            err += "; the file belongs to uid " + std::to_string(st.st_uid) + ". Fix: sudo rm " + path;
+        }
+        return false;
+    }
+
+    // Leave a root-owned trace writable by all, so later non-root runs work.
+    // fstat on the open fd, not the path, and only for a plain file we own
+    // with one link, so this can't be steered at another file.
+    struct stat st;
+    if (root && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 &&
+        st.st_nlink == 1 && (st.st_mode & 0777) != 0666) {
+        if (fchmod(fd, 0666) != 0) {
+            LOG_DEBUG("fchmod %s: %s", path, std::strerror(errno));
+        }
+    }
+    ::close(fd);
+    return true;
+}
+
 } // namespace
 
 NetifSession::NetifSession(EventSink on_event, PreventTimeout prevent_timeout, ErrorSink on_error)
@@ -98,6 +150,9 @@ bool NetifSession::open(const Config& cfg, std::string& err)
     }
     if (cfg.cleanup_stale) {
         cleanup_stale(cfg.netif_path);
+    }
+    if (!prepare_debug_log(cfg.cleanup_stale, err)) {
+        return false;
     }
 
     if (!fork_(cfg.netif_path, err)) {

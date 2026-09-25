@@ -400,6 +400,39 @@ test_stale_cleanup_disabled()
     check "no fake process left" bash -c "! pgrep -x fake_netif >/dev/null"
 }
 
+test_debug_log_unwritable()
+{
+    begin "es2netif debug log not writable: clear error, no es2netif crash"
+    # es2netif crashes if it can't append to /tmp/test.txt. The bridge must
+    # notice first and say so. A read-only file gives the same EACCES as
+    # another user's file under fs.protected_regular.
+    local log=/tmp/test.txt existed=0 mode=
+    if [ -e "$log" ]; then
+        existed=1
+        mode=$(stat -c %a "$log")
+        if [ ! -O "$log" ]; then
+            ok "skipped: $log belongs to another user (the check needs to chmod it)"
+            return
+        fi
+    else
+        : > "$log"
+    fi
+    chmod 0444 "$log"
+
+    write_conf
+    start_bridge hold || { chmod "${mode:-644}" "$log"; return; }
+    check "error names the debug log" wait_for "$LOG" "es2netif would crash on startup: it cannot open its debug log /tmp/test.txt"
+    check "es2netif was not started" bash -c "! grep -qF 'fake: open' '$LOG'"
+    check "bridge keeps retrying" wait_for "$LOG" "reconnecting in"
+    check "SIGTERM exits 0" stop_bridge
+
+    if [ "$existed" -eq 1 ]; then chmod "$mode" "$log"; else rm -f "$log"; fi
+    # interrupt.dat is created before the check and, like any early open
+    # failure, deliberately left in place (see dat_owned_ in AGENTS.md).
+    rm -f "$DAT"
+    check "no fake process left" bash -c "! pgrep -x fake_netif >/dev/null"
+}
+
 # ---- main --------------------------------------------------------------------
 
 ALL_TESTS=(
@@ -415,6 +448,7 @@ ALL_TESTS=(
     single_client
     stale_cleanup
     stale_cleanup_disabled
+    debug_log_unwritable
 )
 if [ $# -gt 1 ]; then
     shift

@@ -15,6 +15,8 @@
 
 // es2netif hard-codes this location, so it cannot be configured.
 #define NETIF_WORK_PATH "/tmp/epsonWork/"
+// es2netif also appends a debug trace here, and crashes if it can't.
+#define NETIF_DEBUG_LOG "/tmp/test.txt"
 
 class NetifSession
 {

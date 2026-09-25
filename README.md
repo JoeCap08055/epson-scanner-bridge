@@ -147,6 +147,11 @@ Retries back off from `reconnect_min_s`, doubling up to `reconnect_max_s`. Befor
 - **Only one instance per host.** es2netif hard-codes `/tmp/epsonWork/interrupt.dat` as the key file for its shared memory. So this daemon can't run twice, and it can't run next to an `epsonscan2` scan session on the same machine. With `cleanup_stale = true` (the default), it kills stray `es2netif` processes before connecting, as Epson's own software does.
 - **Session ownership.** While connected, this host holds an open session with the scanner, and `prevent_timeout = true` keeps it open. Scanning from other hosts or apps may be blocked until the daemon disconnects. Set `prevent_timeout = false` if that's a problem.
 - `/tmp/epsonWork/` must be writable by the user the daemon runs as. Don't use systemd `PrivateTmp`.
+- **`/tmp/test.txt` must be writable by whichever user runs the bridge.** `es2netif` appends a debug trace there and crashes on startup if it can't.
+  - On Ubuntu (`fs.protected_regular = 2`), a trace left by another user blocks you, even as root.
+  - Running as root, the bridge repairs this itself: it replaces the file and leaves it root-owned with mode `0666`, which works for everyone.
+  - Otherwise it refuses to start `es2netif` and tells you to run `sudo rm /tmp/test.txt`.
+  - The file keeps growing; delete it now and then if its size bothers you.
 - Only network scanners are supported: this uses `es2netif` with a `//<address>` UDI. USB devices use a different path in epsonscan2.
 
 ## Layout

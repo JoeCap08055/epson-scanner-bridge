@@ -110,6 +110,13 @@ A reconnect attempt first runs the TCP probe of `probe_port` (optional). If the 
   - We fixed it by waiting with no timeout and waking the thread with a signal on `stop()`.
   - Any exit path from the loop must still `unlock()` after an acquire, so es2netif isn't left waiting.
   - `test_semaphore_race` guards this: the fake pauses exactly 1 s, which lined up with the old timeout. The race window is only microseconds, so on an idle machine the test could still pass with the old code. It is a smoke test, not proof.
+- **es2netif crashes unless it can append to `/tmp/test.txt`** (`NETIF_DEBUG_LOG`). Its `main()` does `fopen("/tmp/test.txt", "a")` and then `fprintf` without a NULL check (confirmed by disassembly; the kernel logs `segfault at c0 … in libc.so.6`). The bridge only sees "es2netif exited prematurely".
+  - Ubuntu sets `fs.protected_regular = 2`. With that, an `O_CREAT` open of another user's file in `/tmp` fails with `EACCES`, even for root. So whoever ran es2netif first owns the trace, and everyone else's es2netif crashes. The one exception is a file owned by `/tmp`'s owner, root, which any user with write permission can open.
+  - `prepare_debug_log()` does the same open before forking:
+    - **As root:** if blocked and `cleanup_stale` is on, it removes the file and recreates it. It then makes the root-owned file `0666`, which makes it usable by every user.
+    - **Otherwise:** it fails the open attempt with an error naming the file, and the fix when the file belongs to another uid.
+  - Guard the `fchmod` with `fstat` on the open fd, `S_ISREG`, owner root and one link, and open with `O_NOFOLLOW`, so it can never be steered at another file.
+  - The trace grows without bound (mostly `CheckEvent` lines). The bridge doesn't truncate it.
 - **es2netif may ignore SIGHUP after the scanner disconnects** (seen on real hardware). Keep the SIGKILL fallback after the grace period.
 
 ### Output and socket
@@ -184,6 +191,7 @@ Tested on 2026-09-25 against a scanner at 192.168.1.122:
   - SIGHUP reload: a new value applied, a broken config rejected, and a changed `socket_path` rebound;
   - a second client replacing the first;
   - stale-segment cleanup, with `cleanup_stale` on and off;
+  - an unwritable `/tmp/test.txt`: a clear error, and es2netif is not started (the root-only repair path can't be tested unprivileged);
   - no leftover process, socket or `interrupt.dat` after shutdown.
 
   **Requirements:** bash, **socat** (the socket client), pgrep and ipcs. There is no Python. The script uses `fake_netif --make-stale-shm` to create the colliding shared-memory segment. It refuses to run if a real bridge or `es2netif` is running. Failed runs keep their logs in `/tmp/esb-test.*`. **When you add or change behavior, add a matching test to the script.**
