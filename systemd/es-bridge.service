@@ -1,5 +1,5 @@
 [Unit]
-Description=Epson network scanner event bridge (es2netif -> Unix socket)
+Description=Epson scanner event bridge (es2netif -> Unix socket)
 After=network-online.target
 Wants=network-online.target
 

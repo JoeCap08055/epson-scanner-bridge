@@ -23,7 +23,74 @@ es-bridge -c /etc/es-bridge.conf
 socat - UNIX-CONNECT:/run/es-bridge/events.sock   # watch events
 ```
 
-`systemd/es-bridge.service` is an example unit. It creates `/run/es-bridge/`, and `systemctl reload` sends SIGHUP.
+## Install as a systemd service
+
+`systemd/es-bridge.service` runs the daemon at boot. The unit:
+- starts `/usr/local/sbin/es-bridge -c /etc/es-bridge.conf` once the network is up;
+- creates `/run/es-bridge/` for the socket;
+- restarts the daemon if it exits with an error;
+- maps `systemctl reload` to SIGHUP.
+
+1. **Build and install the binary** to `/usr/local/sbin/es-bridge`:
+
+   ```sh
+   cmake -S . -B build
+   cmake --build build
+   sudo cmake --install build
+   ```
+
+   If you install somewhere else (for example with `-DCMAKE_INSTALL_PREFIX=/usr`), change the `ExecStart=` path in the unit to match.
+
+2. **Create the config** and set `scanner_address`:
+
+   ```sh
+   sudo install -m 0644 es-bridge.conf.example /etc/es-bridge.conf
+   sudoedit /etc/es-bridge.conf
+   sudo /usr/local/sbin/es-bridge -t -c /etc/es-bridge.conf   # must print "OK"
+   ```
+
+   The unit runs as root, so the socket is owned by `root:root` with mode `0660`, and only root can read events. To let other users read them, create a group, add those users to it, and set `socket_group` in the config:
+
+   ```sh
+   sudo groupadd --system scanner
+   sudo usermod -aG scanner "$USER"          # log out and back in afterwards
+   # then in /etc/es-bridge.conf:  socket_group = scanner
+   ```
+
+3. **Install and start the unit:**
+
+   ```sh
+   sudo install -m 0644 systemd/es-bridge.service /etc/systemd/system/es-bridge.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now es-bridge
+   ```
+
+4. **Check that it's working:**
+
+   ```sh
+   systemctl status es-bridge
+   journalctl -u es-bridge -f                        # log; set log_level = debug for more detail
+   socat - UNIX-CONNECT:/run/es-bridge/events.sock   # press the scanner's scan button
+   ```
+
+   Log lines carry journald priorities, so `journalctl -u es-bridge -p warning` shows only problems.
+
+Day-to-day management:
+
+| Task | Command |
+|------|---------|
+| Apply config changes without a restart | `sudo systemctl reload es-bridge` (sends SIGHUP; an invalid config is rejected and the old one kept) |
+| Restart | `sudo systemctl restart es-bridge` |
+| Stop and disable | `sudo systemctl disable --now es-bridge` |
+| Uninstall | disable it, then `sudo rm /etc/systemd/system/es-bridge.service /usr/local/sbin/es-bridge && sudo systemctl daemon-reload` |
+
+Notes:
+- **Run as a regular user (optional).** Use `sudo systemctl edit es-bridge` to add a `User=` and `Group=` under `[Service]`. `/run/es-bridge/` is then created for that user.
+  - Running as root creates `/tmp/epsonWork/` owned by root, and other users can't write to it. That breaks a later non-root run of es-bridge or `epsonscan2`.
+  - If you switch after running as root, stop the service and run `sudo rm -rf /tmp/epsonWork` once.
+- **Don't enable `PrivateTmp`.** `es2netif` insists on `/tmp/epsonWork`, which has to be the real `/tmp`.
+- **Don't run the service alongside a manual `es-bridge` or an `epsonscan2` scan.** Only one of them can use the scanner's IPC channel at a time (see [Caveats](#caveats)).
+- **A config that fails to load at startup never lets the service come up.** The daemon exits with an error, and systemd restarts it every 5 s, indefinitely, logging the error each time. Always check the config with `-t` first.
 
 Signals:
 
