@@ -1,10 +1,10 @@
-# AGENTS.md — es2netif-bridge
+# AGENTS.md — es-bridge
 
 Guidance for anyone, human or AI, changing this project. The README is written for users; this file records the design and the rules we decided to keep.
 
 ## Purpose
 
-es2netif-bridge is a standalone Linux daemon that:
+es-bridge is a standalone Linux daemon that:
 
 1. **Launches `es2netif`** the same way epsonscan2 does and sets up its IPC. `es2netif` is Epson's proprietary helper for talking to network scanners.
 2. **Receives scanner interrupt events** (scan button, session events) over the IPC channel.
@@ -168,7 +168,7 @@ Tested on 2026-09-25 against a scanner at 192.168.1.122:
   The build must produce no warnings. Build out of tree, in `build/`.
 - **Check the config:**
   ```sh
-  build/es2netif-bridge -t -c <file>
+  build/es-bridge -t -c <file>
   ```
 - **Automated tests (run these after every change):**
   ```sh
@@ -186,8 +186,8 @@ Tested on 2026-09-25 against a scanner at 192.168.1.122:
   - stale-segment cleanup, with `cleanup_stale` on and off;
   - no leftover process, socket or `interrupt.dat` after shutdown.
 
-  **Requirements:** bash, **socat** (the socket client), pgrep and ipcs. There is no Python. The script uses `fake_netif --make-stale-shm` to create the colliding shared-memory segment. It refuses to run if a real bridge or `es2netif` is running. Failed runs keep their logs in `/tmp/es2nb-test.*`. **When you add or change behavior, add a matching test to the script.**
-- **Without hardware:** use `tests/fake_netif.cpp`, which builds as `build/fake_netif` by default and can be turned off with `-DES2NB_BUILD_TESTS=OFF`. It plays the part of `es2netif`:
+  **Requirements:** bash, **socat** (the socket client), pgrep and ipcs. There is no Python. The script uses `fake_netif --make-stale-shm` to create the colliding shared-memory segment. It refuses to run if a real bridge or `es2netif` is running. Failed runs keep their logs in `/tmp/esb-test.*`. **When you add or change behavior, add a matching test to the script.**
+- **Without hardware:** use `tests/fake_netif.cpp`, which builds as `build/fake_netif` by default and can be turned off with `-DESB_BUILD_TESTS=OFF`. It plays the part of `es2netif`:
   - prints a port and accepts the TCP connection;
   - answers the open and status requests;
   - attaches to the shared memory and semaphore;
@@ -212,4 +212,4 @@ Tested on 2026-09-25 against a scanner at 192.168.1.122:
   If the protocol handling changes, keep the fake in step with it.
 - **With hardware:** run with `log_level = debug`, watch the socket with `socat - UNIX-CONNECT:<socket_path>`, and check `ipcs -m -s` and `pgrep es2netif`.
   - After SIGTERM, there must be no leftover es2netif process, shared memory, semaphore, `interrupt.dat` or socket file.
-  - `/run/es2netif-bridge/` is owned by root, so for testing as your own user, point `socket_path` somewhere writable.
+  - `/run/es-bridge/` is owned by root, so for testing as your own user, point `socket_path` somewhere writable.

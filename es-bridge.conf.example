@@ -1,4 +1,4 @@
-# es2netif-bridge configuration. Send SIGHUP to reload.
+# es-bridge configuration. Send SIGHUP to reload.
 # Format: key = value. Lines starting with '#' or ';' are comments.
 
 # IP address or hostname of the Epson network scanner (required).
@@ -9,7 +9,7 @@ netif_path         = /usr/lib/x86_64-linux-gnu/epsonscan2/non-free-exec/es2netif
 
 # Unix domain socket where events are published as NDJSON. Only one client is
 # served at a time, and a new connection replaces the old one.
-socket_path        = /run/es2netif-bridge/events.sock
+socket_path        = /run/es-bridge/events.sock
 socket_mode        = 0660
 # socket_group     = scanner
 

@@ -5,9 +5,9 @@
 
 #include "log.hpp"
 
-#define DEFAULT_CONFIG_PATH "/etc/es2netif-bridge.conf"
+#define DEFAULT_CONFIG_PATH "/etc/es-bridge.conf"
 #define DEFAULT_NETIF_PATH  "/usr/lib/x86_64-linux-gnu/epsonscan2/non-free-exec/es2netif"
-#define DEFAULT_SOCKET_PATH "/run/es2netif-bridge/events.sock"
+#define DEFAULT_SOCKET_PATH "/run/es-bridge/events.sock"
 
 struct Config
 {

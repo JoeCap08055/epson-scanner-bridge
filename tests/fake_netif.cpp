@@ -1,4 +1,4 @@
-// Test double for Epson's es2netif, for exercising es2netif-bridge without a
+// Test double for Epson's es2netif, for exercising es-bridge without a
 // scanner. It speaks the same IPC protocol as the real helper:
 //   1. prints its TCP port on stdout and accepts one connection;
 //   2. answers the open request (token 7) and both status queries

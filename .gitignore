@@ -10,14 +10,14 @@ Testing/
 Makefile
 compile_commands.json
 install_manifest.txt
-/es2netif-bridge
+/es-bridge
 /fake_netif
 
 # Object files
 *.o
 
-# Local configuration (the template is es2netif-bridge.conf.example)
-/es2netif-bridge.conf
+# Local configuration (the template is es-bridge.conf.example)
+/es-bridge.conf
 
 # Editor and IDE files
 *.geany

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end tests for es2netif-bridge, run against tests/fake_netif.
+# End-to-end tests for es-bridge, run against tests/fake_netif.
 #
 # Usage: tests/run_tests.sh [BUILD_DIR [TEST...]]   (default: build, all tests)
 #   TEST is a test function name without the test_ prefix, e.g. sighup.
@@ -11,7 +11,7 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BUILD=$(cd "${1:-$ROOT/build}" && pwd) || { echo "build dir not found"; exit 2; }
-BRIDGE=$BUILD/es2netif-bridge
+BRIDGE=$BUILD/es-bridge
 FAKE=$BUILD/fake_netif
 WORK=/tmp/epsonWork
 DAT=$WORK/interrupt.dat
@@ -22,12 +22,12 @@ done
 for tool in socat pgrep ipcs; do
     command -v "$tool" >/dev/null || { echo "$tool is required"; exit 2; }
 done
-if pgrep -x es2netif-bridge >/dev/null || pgrep -x es2netif >/dev/null; then
-    echo "an es2netif-bridge or es2netif process is already running; refusing to share /tmp/epsonWork"
+if pgrep -x es-bridge >/dev/null || pgrep -x es2netif >/dev/null; then
+    echo "an es-bridge or es2netif process is already running; refusing to share /tmp/epsonWork"
     exit 2
 fi
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/es2nb-test.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/esb-test.XXXXXX")
 SOCK=$T/events.sock
 CONF=$T/test.conf
 LOG=$T/bridge.log
@@ -169,7 +169,7 @@ make_stale_shm()
 test_config_validation()
 {
     begin "config validation"
-    check "example config is valid" bash -c "'$BRIDGE' -t -c '$ROOT/es2netif-bridge.conf.example' >/dev/null 2>&1"
+    check "example config is valid" bash -c "'$BRIDGE' -t -c '$ROOT/es-bridge.conf.example' >/dev/null 2>&1"
 
     printf 'scanner_address = 1.2.3.4\nsocket_mode = 999\n' > "$T/bad.conf"
     check "invalid socket_mode is rejected" bash -c "! '$BRIDGE' -t -c '$T/bad.conf' 2>/dev/null"

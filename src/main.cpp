@@ -1,4 +1,4 @@
-// es2netif-bridge: publishes Epson network-scanner interrupt events (button
+// es-bridge: publishes Epson network-scanner interrupt events (button
 // presses and similar) as NDJSON on a Unix domain socket.
 
 #include <algorithm>

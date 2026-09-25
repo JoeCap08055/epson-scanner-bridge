@@ -1,4 +1,4 @@
-# es2netif-bridge
+# es-bridge
 
 A small daemon that publishes events from an Epson **network** scanner (panel button presses, session events) as newline-delimited JSON on a Unix domain socket.
 
@@ -17,13 +17,13 @@ Requirements: a C++17 compiler, CMake ≥ 3.13, Linux, and the `epsonscan2` pack
 ## Run
 
 ```sh
-cp es2netif-bridge.conf.example /etc/es2netif-bridge.conf   # set scanner_address
-es2netif-bridge -t -c /etc/es2netif-bridge.conf              # validate only
-es2netif-bridge -c /etc/es2netif-bridge.conf
-socat - UNIX-CONNECT:/run/es2netif-bridge/events.sock        # watch events
+cp es-bridge.conf.example /etc/es-bridge.conf    # set scanner_address
+es-bridge -t -c /etc/es-bridge.conf               # validate only
+es-bridge -c /etc/es-bridge.conf
+socat - UNIX-CONNECT:/run/es-bridge/events.sock   # watch events
 ```
 
-`systemd/es2netif-bridge.service` is an example unit. It creates `/run/es2netif-bridge/`, and `systemctl reload` sends SIGHUP.
+`systemd/es-bridge.service` is an example unit. It creates `/run/es-bridge/`, and `systemctl reload` sends SIGHUP.
 
 Signals:
 

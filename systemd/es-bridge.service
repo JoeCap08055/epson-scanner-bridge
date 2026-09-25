@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/es2netif-bridge -c /etc/es2netif-bridge.conf
+ExecStart=/usr/local/sbin/es-bridge -c /etc/es-bridge.conf
 ExecReload=/bin/kill -HUP $MAINPID
-RuntimeDirectory=es2netif-bridge
+RuntimeDirectory=es-bridge
 RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=5
