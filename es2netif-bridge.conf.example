@@ -1,0 +1,38 @@
+# es2netif-bridge configuration. Send SIGHUP to reload.
+# Format: key = value. Lines starting with '#' or ';' are comments.
+
+# IP address or hostname of the Epson network scanner (required).
+scanner_address    = 192.168.1.50
+
+# Epson's proprietary network interface helper (from the epsonscan2 package).
+netif_path         = /usr/lib/x86_64-linux-gnu/epsonscan2/non-free-exec/es2netif
+
+# Unix domain socket where events are published as NDJSON. Only one client is
+# served at a time, and a new connection replaces the old one.
+socket_path        = /run/es2netif-bridge/events.sock
+socket_mode        = 0660
+# socket_group     = scanner
+
+# Answer es2netif's "should the session be kept alive?" question with yes, so
+# button events keep flowing. With false, the scanner session times out and the
+# daemon reconnects.
+prevent_timeout    = true
+
+# Reconnect backoff in seconds. The delay starts at min and doubles up to max.
+reconnect_min_s    = 5
+reconnect_max_s    = 60
+
+# Before starting es2netif, check that this TCP port on the scanner accepts
+# connections (1865 is the ESC/I-2 network port). 0 disables the probe.
+probe_port         = 1865
+
+# Kill stray es2netif processes and remove a leftover interrupt shared-memory
+# segment before connecting. Epson's own software does the same, and it
+# disrupts a concurrently running epsonscan2.
+cleanup_stale      = true
+
+# Emit connected / disconnected / reconnecting / config_reloaded events.
+emit_status_events = true
+
+# debug | info | warn | error
+log_level          = info

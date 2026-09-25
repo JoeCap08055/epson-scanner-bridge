@@ -1,0 +1,19 @@
+[Unit]
+Description=Epson network scanner event bridge (es2netif -> Unix socket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/es2netif-bridge -c /etc/es2netif-bridge.conf
+ExecReload=/bin/kill -HUP $MAINPID
+RuntimeDirectory=es2netif-bridge
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5
+# es2netif needs /tmp/epsonWork shared with anything else using the scanner,
+# so PrivateTmp stays off.
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+# Out-of-tree build directory (the supported way to build)
+/build/
+
+# In-source CMake build output
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+Makefile
+compile_commands.json
+install_manifest.txt
+/es2netif-bridge
+/fake_netif
+
+# Object files
+*.o
+
+# Local configuration (the template is es2netif-bridge.conf.example)
+/es2netif-bridge.conf
+
+# Editor and IDE files
+*.geany
+*.swp
+*~
+.vscode/
+.idea/
