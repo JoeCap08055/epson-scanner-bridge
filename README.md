@@ -52,7 +52,7 @@ socat - UNIX-CONNECT:/run/es-bridge/events.sock   # watch events
    The unit runs as root, so the socket is owned by `root:root` with mode `0660`, and only root can read events. To let other users read them, create a group, add those users to it, and set `socket_group` in the config:
 
    ```sh
-   sudo groupadd --system scanner
+   getent group scanner || sudo groupadd --system scanner   # Debian/Ubuntu already have it
    sudo usermod -aG scanner "$USER"          # log out and back in afterwards
    # then in /etc/es-bridge.conf:  socket_group = scanner
    ```
@@ -98,6 +98,109 @@ Signals:
 |--------|--------|
 | `SIGHUP` | Re-reads the config. If the new file is invalid, the daemon logs the error and keeps the current config. If it is valid, the scanner session is torn down and re-opened with the new settings. The Unix socket is rebound only when `socket_*` settings changed, so a connected client stays connected. |
 | `SIGTERM` / `SIGINT` | Clean shutdown: sends the close request, terminates es2netif, removes the shm/semaphore, `interrupt.dat` and the socket. |
+
+## Scan when the button is pressed
+
+`contrib/scan-trigger/es-scan-trigger` is a bash script that turns the scan button into a real scan with [NAPS2](https://www.naps2.com/). It needs `socat` and `jq`.
+- It connects to es-bridge's socket with socat and parses each event with jq.
+- On each `request_start_scanning` event it runs:
+
+  ```sh
+  naps2 console --noprofile --driver sane --device "EPSON FF-680W" \
+      --source duplex --dpi 300 --bitdepth color --verbose \
+      --output /var/lib/es-scan-trigger/scans/scan-YYYYMMDD-HHMMSS.pdf
+  ```
+
+  Every option comes from `/etc/es-scan-trigger.conf`.
+- It reconnects if the bridge restarts, and reloads its config on SIGHUP.
+
+It runs as a system service, not tied to any user: by default as the account `es-scan`, or as root if you prefer. `--noprofile` means no NAPS2 GUI profile is involved.
+
+1. **Find the scanner's driverless address:**
+
+   ```sh
+   airscan-discover
+   #   EPSON FF-680W = http://192.168.1.122:80/WDP/SCAN, WSD
+   ```
+
+   Use it for `NAPS2_DEVICE` (the name), `AIRSCAN_URL` and `AIRSCAN_PROTOCOL` in step 3. With `AIRSCAN_URL` set, NAPS2 gets a private SANE configuration: only the `airscan` backend, with just this device declared and discovery off. This matters for two reasons:
+   - SANE's network discovery doesn't always see the scanner in time. NAPS2 then reports it "offline" or says it "could not be found", on some attempts and not others.
+   - The epsonscan2 device is hidden. **Never scan through it** ("network scanner (epsonscan2)"): epsonscan2 kills every `es2netif` process when it opens a scanner, including es-bridge's.
+
+   `/etc/sane.d` isn't changed. To try NAPS2 by hand first, use `naps2 console --noprofile --driver sane --listdevices`.
+
+2. **Create the service account** and give it access to es-bridge's socket through the `scanner` group:
+
+   ```sh
+   sudo useradd --system --home-dir /var/lib/es-scan-trigger --no-create-home \
+        --shell /usr/sbin/nologin es-scan
+   getent group scanner || sudo groupadd --system scanner   # Debian/Ubuntu already have it
+   # in /etc/es-bridge.conf:  socket_group = scanner
+   sudo systemctl reload es-bridge
+   ```
+
+   The unit adds `scanner` as a supplementary group, so `es-scan` doesn't need to be a member.
+
+3. **Install the script, its config and the unit:**
+
+   ```sh
+   sudo cmake --install build        # also installs /usr/local/bin/es-scan-trigger
+   sudo install -m 0644 contrib/scan-trigger/es-scan-trigger.conf.example /etc/es-scan-trigger.conf
+   sudoedit /etc/es-scan-trigger.conf     # NAPS2_DEVICE, AIRSCAN_URL (step 1), source, dpi, output folder
+   sudo install -m 0644 contrib/scan-trigger/es-scan-trigger.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now es-scan-trigger
+   ```
+
+4. **Press the scan button** and watch the log:
+
+   ```sh
+   journalctl -u es-scan-trigger -f
+   ```
+
+   Scans go to `/var/lib/es-scan-trigger/scans/` by default. systemd creates that folder for the service account, and the unit's `UMask=0022` leaves the scans readable by everyone.
+
+**To run as root instead**, add a drop-in with `sudo systemctl edit es-scan-trigger`:
+
+```ini
+[Service]
+User=root
+Group=root
+SupplementaryGroups=
+```
+
+As root, `socket_group` isn't needed.
+
+**To save scans somewhere else**, set `OUTPUT_DIR`, for example to a shared folder. The service account must be able to write there. The unit uses `ProtectSystem=full`, which makes `/usr`, `/boot` and `/etc` read-only for it; everywhere else only normal permissions apply.
+
+Settings in `/etc/es-scan-trigger.conf` (sourced as bash; leave a NAPS2 setting empty to omit that option):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `NAPS2_DEVICE` | empty | `--device`. The name can be a partial match; see step 1. Empty lets NAPS2 choose, and it logs a warning. |
+| `NAPS2_DRIVER` | `sane` | `--driver`: `sane` or `escl` on Linux |
+| `NAPS2_SOURCE` | `duplex` | `--source`: `glass`, `feeder` or `duplex` |
+| `NAPS2_DPI` | `300` | `--dpi` |
+| `NAPS2_BITDEPTH` | `color` | `--bitdepth`: `color`, `gray` or `bw` |
+| `NAPS2_VERBOSE` | `yes` | Pass `--verbose`, so NAPS2's progress appears in the log |
+| `NAPS2_EXTRA_ARGS` | `()` | Other NAPS2 options, as a bash array, e.g. `(--pagesize letter --deskew)` or `(--ocrlang eng)` |
+| `AIRSCAN_URL` | empty | Declare the scanner to SANE `airscan` at this URL (from `airscan-discover`). NAPS2 then uses a private SANE configuration: only airscan, this device named `NAPS2_DEVICE`, and no discovery. Recommended. Requires `NAPS2_DRIVER=sane`. |
+| `AIRSCAN_PROTOCOL` | `WSD` | `WSD` or `eSCL`, as shown by `airscan-discover` |
+| `NAPS2` | `naps2` | NAPS2 command or path |
+| `OUTPUT_DIR` | `/var/lib/es-scan-trigger/scans` | Created if missing |
+| `OUTPUT_NAME` | `scan-%Y%m%d-%H%M%S.pdf` | `date(1)` pattern. The extension sets the format. If the name exists, `-2`, `-3`, … is added. |
+| `TRIGGER_EVENTS` | `request_start_scanning` | Space-separated event names that start a scan |
+| `SCANNER` | empty | Only react to this scanner address; empty means any |
+| `SOCKET` | `/run/es-bridge/events.sock` | es-bridge's event socket |
+| `RECONNECT_DELAY` | `5` | Seconds between reconnect attempts |
+
+Invalid values stop the service at startup with a message saying which setting is wrong. On reload, an invalid file is rejected and the current settings stay.
+
+Behavior worth knowing:
+- **One scan at a time.** Presses made while a scan is running are logged and ignored, rather than queued up as extra scans.
+- **NAPS2 exits 0 even when it scanned nothing,** for example with an empty feeder or an unreachable scanner. The script checks for the output file and logs "no pages scanned" when there isn't one. The service keeps running after any failed scan.
+- **Stopping the service** (SIGTERM) also stops a scan in progress, including all of the processes NAPS2 started.
+- **It takes es-bridge's only client slot.** If you connect with `socat` to watch events, es-scan-trigger is disconnected, and when it reconnects a few seconds later your socat is dropped. Watch `journalctl -u es-scan-trigger` instead, or stop the trigger while debugging.
 
 ## Output
 
@@ -162,6 +265,8 @@ Retries back off from `reconnect_min_s`, doubling up to `reconnect_max_s`. Befor
 - `src/main.cpp`: poll loop, signal handling (signalfd), reconnect state machine.
 - `tests/fake_netif.cpp`: fake `es2netif` for testing without a scanner (see AGENTS.md).
 - `tests/run_tests.sh`: end-to-end tests against the fake. Run them with `ctest --test-dir build --output-on-failure`. They need `socat`.
+- `contrib/scan-trigger/`: `es-scan-trigger`, which scans with NAPS2 when the button is pressed, with its example config and systemd unit.
+- `tests/test_scan_trigger.sh`: tests for `es-scan-trigger` against a mock socket; they need `socat` and `jq`. They're safe to run while the real service is active.
 
 ## License
 

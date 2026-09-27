@@ -1,0 +1,43 @@
+# Scans with NAPS2 when the scanner's scan button is pressed.
+#
+# Runs as the system account "es-scan", which reads es-bridge's socket through
+# the "scanner" group (set socket_group = scanner in /etc/es-bridge.conf). To
+# run as root instead, add a drop-in with `systemctl edit es-scan-trigger`:
+#   [Service]
+#   User=root
+#   Group=root
+#   SupplementaryGroups=
+[Unit]
+Description=Scan with NAPS2 when the Epson scanner's scan button is pressed
+After=es-bridge.service network-online.target
+Wants=es-bridge.service network-online.target
+
+[Service]
+Type=simple
+User=es-scan
+Group=es-scan
+SupplementaryGroups=scanner
+ExecStart=/usr/local/bin/es-scan-trigger -c /etc/es-scan-trigger.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# NAPS2 keeps its settings and temporary files under $HOME. systemd creates
+# /var/lib/es-scan-trigger for the service user, and the default scan folder
+# lives inside it. UMask 0022 leaves scans readable by other users.
+StateDirectory=es-scan-trigger
+StateDirectoryMode=0755
+# Holds the private SANE configuration generated when AIRSCAN_URL is set.
+RuntimeDirectory=es-scan-trigger
+Environment=HOME=/var/lib/es-scan-trigger
+WorkingDirectory=/var/lib/es-scan-trigger
+UMask=0022
+
+# Hardening that NAPS2 is fine with. The airscan driver doesn't use
+# /tmp/epsonWork, so a private /tmp is safe here.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

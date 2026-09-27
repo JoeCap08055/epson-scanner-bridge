@@ -1,0 +1,70 @@
+# es-scan-trigger configuration. It is sourced as bash, so use KEY=value with
+# no spaces around '=' and quote values that contain spaces. Send SIGHUP
+# (systemctl reload es-scan-trigger) to apply changes.
+
+# es-bridge's event socket.
+SOCKET=/run/es-bridge/events.sock
+
+# Where scans go, and the file name pattern (strftime, see date(1)). The
+# extension sets the output format (.pdf, .jpg, .png, .tiff, ...). If a name
+# already exists, -2, -3, ... is added before the extension. The default
+# folder is created by systemd (StateDirectory) and owned by the service user.
+OUTPUT_DIR=/var/lib/es-scan-trigger/scans
+OUTPUT_NAME='scan-%Y%m%d-%H%M%S.pdf'
+
+# Space-separated event names that start a scan. The scan button sends
+# request_start_scanning. Some models send button_press instead.
+TRIGGER_EVENTS='request_start_scanning'
+
+# Only react to this scanner address (es-bridge's scanner_address). Empty means
+# any scanner.
+SCANNER=''
+
+# Seconds to wait before reconnecting to the socket.
+RECONNECT_DELAY=5
+
+# ---- NAPS2 -------------------------------------------------------------------
+# Each scan runs:
+#   naps2 console --noprofile --driver D --device N --source S --dpi R
+#                 --bitdepth B [--verbose] [extra args] --output FILE
+# Leave a setting empty to omit its option and use NAPS2's default.
+
+NAPS2=naps2
+
+# sane or escl on Linux.
+NAPS2_DRIVER=sane
+
+# Device name; a partial match is enough. List the choices with:
+#   naps2 console --noprofile --driver sane --listdevices
+# Pick the airscan (driverless) device, e.g. "EPSON FF-680W (airscan:...)".
+# Never pick the epsonscan2 one ("network scanner (epsonscan2)"): opening it
+# kills es-bridge's es2netif helper.
+NAPS2_DEVICE='EPSON FF-680W'
+
+# glass, feeder or duplex.
+NAPS2_SOURCE=duplex
+
+# Resolution in dots per inch.
+NAPS2_DPI=300
+
+# color, gray or bw.
+NAPS2_BITDEPTH=color
+
+# yes: pass --verbose, so NAPS2's progress appears in the service log.
+NAPS2_VERBOSE=yes
+
+# Declare the scanner to SANE's airscan backend directly (recommended). SANE
+# finds network scanners by discovery, which doesn't always see the scanner in
+# time; NAPS2 then reports it "offline" or "could not be found". With
+# AIRSCAN_URL set, NAPS2 gets a private SANE configuration with only airscan
+# and this one device, named NAPS2_DEVICE, and discovery off. That also hides
+# the epsonscan2 device. /etc/sane.d is not changed.
+# Find the URL and protocol with `airscan-discover`, e.g.
+#   EPSON FF-680W = http://192.168.1.122:80/WDP/SCAN, WSD
+AIRSCAN_URL=''          # e.g. http://192.168.1.122:80/WDP/SCAN
+AIRSCAN_PROTOCOL=WSD    # WSD or eSCL
+
+# Any other NAPS2 options, as a bash array. See `naps2 console --help`, e.g.:
+#   NAPS2_EXTRA_ARGS=(--pagesize letter --deskew)
+#   NAPS2_EXTRA_ARGS=(--ocrlang eng)
+NAPS2_EXTRA_ARGS=()

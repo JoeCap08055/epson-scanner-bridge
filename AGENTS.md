@@ -31,6 +31,8 @@ src/json.*             Minimal flat JSON object builder
 src/log.*              Leveled stderr logging; adds sd-daemon <N> prefixes only when JOURNAL_STREAM is set
 tests/fake_netif.cpp   Test double for es2netif (see Testing)
 tests/run_tests.sh     End-to-end test suite, registered with CTest
+tests/test_scan_trigger.sh  Tests for es-scan-trigger against a mock socket (CTest: scan_trigger)
+contrib/scan-trigger/  es-scan-trigger: bash + socat client that runs a NAPS2 scan on request_start_scanning
 vendor/epson/          Vendored Epson IPC headers (see "Vendored code")
 ```
 
@@ -136,6 +138,39 @@ A reconnect attempt first runs the TCP probe of `probe_port` (optional). If the 
 - **A successful reload always restarts the session.** It **rebinds the socket only when `socket_path`, `socket_mode` or `socket_group` changed**, so a connected client survives an ordinary reload.
 - **`prevent_timeout` defaults to true.** The interrupt thread reads it through an atomic, so a reload changes the answer without a race.
 
+### es-scan-trigger (`contrib/scan-trigger/`)
+
+- **It's a separate client of the socket.** It depends only on the JSON event format, never on es-bridge internals. It needs bash, socat and **jq**.
+  - **Parse events with jq, not by position.** `parse_event()` makes one jq call per line and returns `event`, `ts` and `scanner` joined with `@tsv`, which escapes tabs and newlines inside values, so splitting on tabs is safe. Field order, spacing and extra fields don't matter.
+  - Invalid JSON or a non-object is logged and skipped.
+  - Lines not starting with `{` are treated as socat's own messages and never parsed.
+- **It's a system service, not per-user,** and it only runs NAPS2. It runs as the account `es-scan` with `SupplementaryGroups=scanner` for socket access, or as root through a drop-in.
+  - NAPS2 is always called with `--noprofile`, so no GUI profile or home directory of a real user is involved. Every scan option comes from the config (`NAPS2_*`).
+  - NAPS2 still needs a writable `$HOME` for its own files. The unit sets `HOME` to the `StateDirectory` (`/var/lib/es-scan-trigger`). For root services systemd sets no `HOME` by default.
+- **Build the NAPS2 command as an argument array, never a string for `bash -c`.** Empty settings leave their option out. `NAPS2_EXTRA_ARGS` is a bash array. `naps2_args()` prints the arguments NUL-separated and `mapfile -d ''` reads them back, so values with spaces survive.
+- **Validate settings against NAPS2's documented values** (`--source glass|feeder|duplex`, `--bitdepth color|gray|bw`, `--driver sane|escl|wia|twain|apple`, a numeric `--dpi`). A bad value fails at startup, or is rejected on reload.
+- **NAPS2 exits 0 even when it scanned nothing,** so success means a non-empty output file exists.
+- **`AIRSCAN_URL` gives NAPS2 a private SANE configuration.** `setup_sane()` writes `$RUNTIME_DIRECTORY/sane/` (the unit sets `RuntimeDirectory=es-scan-trigger`) and exports `SANE_CONFIG_DIR` for NAPS2 only:
+  - `dll.conf` contains just `airscan`;
+  - `airscan.conf` declares `NAPS2_DEVICE` at the URL, with `discovery = disable`.
+
+  Why:
+  - Discovery was unreliable on real hardware (2026-09-25): the scanner's WSD metadata reply sometimes missed SANE's discovery window, so NAPS2 said "offline" or "could not be found". The static entry found it 3 times out of 3.
+  - It also hides the epsonscan2 backend.
+
+  Keep these rules:
+  - **No trailing `:` on `SANE_CONFIG_DIR`.** That appends the system directories, whose `dll.d` brings epsonscan2 back.
+  - **The directory must be complete.** A missing one means SANE finds no scanners.
+  - **Never modify `/etc/sane.d`.**
+- **Use `--device` (a partial match) carefully.** A name that matches the epsonscan2 device ("network scanner (epsonscan2)") would make NAPS2 open it through epsonscan2, which kills es-bridge's `es2netif`.
+- **Scan commands must not use the epsonscan2 driver.** epsonscan2 runs `killall -9 es2netif` when it starts (`Controller/Src/Scanner/Engine.cpp:275`), which kills es-bridge's helper. NAPS2 via SANE `airscan`/eSCL is fine.
+- **Read with `read -t 1`, keeping any partial line in `partial`.** bash 5.2 doesn't interrupt `read` for a trapped signal, so without the timeout a SIGHUP would wait for the next event.
+- **Read from a process substitution (`exec {fd}< <(socat …)`), not a `coproc`.** Bash closes a coprocess's fds as soon as it exits, which can drop the last lines.
+- **Run each scan under `setsid`, and stop it with `kill -- -PGID`.** Otherwise SIGTERM kills only the `bash -c` and orphans NAPS2.
+- **Presses made during a scan are ignored,** not queued. An event whose `ts` is earlier than the end of the last scan is dropped; the timestamps compare as strings, because both are UTC RFC 3339 with milliseconds.
+- **A failed reload keeps the old settings.** The script takes a `declare -p` snapshot and replays it with `eval`, after rewriting `declare` to `declare -g`. Without `-g`, replaying inside a function would create locals and leave the rejected values in place. This was a real bug.
+- **It takes the bridge's single client slot.** A manual `socat` and the trigger will keep knocking each other off.
+
 ### Project rules
 
 - **Language and dependencies:** C++17 and CMake ≥ 3.13, with no third-party dependencies. The only libraries used are libc, libstdc++ and pthreads.
@@ -194,12 +229,27 @@ Tested on 2026-09-25 against a scanner at 192.168.1.122:
   - an unwritable `/tmp/test.txt`: a clear error, and es2netif is not started (the root-only repair path can't be tested unprivileged);
   - no leftover process, socket or `interrupt.dat` after shutdown.
 
+  `tests/test_scan_trigger.sh` (CTest `scan_trigger`) tests `es-scan-trigger` against a socat mock server. It needs no bridge or `/tmp/epsonWork`, so it runs even while the real service is active. It covers:
+  - the exact NAPS2 argument list built from the config, including extra args with spaces, and omitting empty settings;
+  - invalid NAPS2 and `AIRSCAN_*` settings rejected at startup;
+  - `AIRSCAN_URL` producing the private SANE config and `SANE_CONFIG_DIR`, and removing it on reload going back to the system config;
+  - "no pages" (exit 0 without a file) and a failing NAPS2, both logged without stopping the service;
+  - non-trigger events ignored, and the `SCANNER` filter;
+  - JSON parsing: reordered, spaced-out events with extra fields still trigger, and malformed or non-object lines are logged and skipped;
+  - a `TRIGGER_EVENTS` list, and `-2` name suffixes;
+  - presses during a scan ignored, while later presses still scan;
+  - reconnecting after the socket disappears;
+  - SIGHUP reload: new settings applied, and a broken config rejected with the old values really kept;
+  - SIGTERM stopping a running scan's whole process group (the stub records its PID, and the test checks that process group is empty).
+
+  It needs bash, socat and jq, and uses a stub `naps2` that records its arguments. Don't check for processes with `pgrep -f <path>`: the checker's own command line matches.
+
   **Requirements:** bash, **socat** (the socket client), pgrep and ipcs. There is no Python. The script uses `fake_netif --make-stale-shm` to create the colliding shared-memory segment. It refuses to run if a real bridge or `es2netif` is running. Failed runs keep their logs in `/tmp/esb-test.*`. **When you add or change behavior, add a matching test to the script.**
 - **Without hardware:** use `tests/fake_netif.cpp`, which builds as `build/fake_netif` by default and can be turned off with `-DESB_BUILD_TESTS=OFF`. It plays the part of `es2netif`:
   - prints a port and accepts the TCP connection;
   - answers the open and status requests;
   - attaches to the shared memory and semaphore;
-  - fires `button_press`, `ask_is_should_prevent_timeout` and `reserved_by_host`, using the `semop(-1)` then `semtimedop(wait 0, +1)` sequence.
+  - fires `button_press`, `request_start_scanning`, `ask_is_should_prevent_timeout` and `reserved_by_host`, using the `semop(-1)` then `semtimedop(wait 0, +1)` sequence.
 
   `FAKE_MODE` then picks the ending:
 

@@ -31,6 +31,12 @@ install(TARGETS es-bridge DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES es-bridge.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES systemd/es-bridge.service DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
+# Optional helper that runs a scan command when the scan button is pressed.
+install(PROGRAMS contrib/scan-trigger/es-scan-trigger DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES contrib/scan-trigger/es-scan-trigger.conf.example
+              contrib/scan-trigger/es-scan-trigger.service
+        DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
 option(ESB_BUILD_TESTS "Build the fake es2netif test double" ON)
 if(ESB_BUILD_TESTS)
   add_executable(fake_netif tests/fake_netif.cpp)
@@ -41,4 +47,7 @@ if(ESB_BUILD_TESTS)
   add_test(NAME end_to_end
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh ${CMAKE_CURRENT_BINARY_DIR})
   set_tests_properties(end_to_end PROPERTIES TIMEOUT 300)
+  add_test(NAME scan_trigger
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scan_trigger.sh)
+  set_tests_properties(scan_trigger PROPERTIES TIMEOUT 300)
 endif()

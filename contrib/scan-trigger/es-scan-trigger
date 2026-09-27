@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# es-scan-trigger: scan with NAPS2 when the scanner's scan button is pressed.
+#
+# Connects to es-bridge's event socket with socat. For each trigger event (by
+# default request_start_scanning) it runs
+#   naps2 console --noprofile --driver ... --device ... --output <new file>
+# with the options from the config file. It reconnects if the socket goes away
+# and reloads its config on SIGHUP. Meant to run as a system service, as root
+# or a service account.
+#
+# Usage: es-scan-trigger [-c CONFIG]    (default /etc/es-scan-trigger.conf)
+#
+# Requires bash, socat, jq and NAPS2.
+set -u
+
+CONFIG=/etc/es-scan-trigger.conf
+
+usage() { echo "usage: ${0##*/} [-c CONFIG]" >&2; }
+
+while getopts ":c:h" opt; do
+    case $opt in
+        c) CONFIG=$OPTARG ;;
+        h) usage; exit 0 ;;
+        *) usage; exit 2 ;;
+    esac
+done
+
+log() { printf '%s\n' "$*" >&2; }
+
+for tool in socat jq; do
+    command -v "$tool" >/dev/null || { log "error: $tool is required"; exit 1; }
+done
+
+# ---- configuration -----------------------------------------------------------
+
+CONFIG_VARS=(SOCKET OUTPUT_DIR OUTPUT_NAME TRIGGER_EVENTS SCANNER RECONNECT_DELAY
+             NAPS2 NAPS2_DRIVER NAPS2_DEVICE NAPS2_SOURCE NAPS2_DPI NAPS2_BITDEPTH
+             NAPS2_VERBOSE NAPS2_EXTRA_ARGS AIRSCAN_URL AIRSCAN_PROTOCOL)
+
+load_config()
+{
+    # Defaults. The config file is sourced as bash and may override any of them.
+    SOCKET=/run/es-bridge/events.sock
+    OUTPUT_DIR=/var/lib/es-scan-trigger/scans
+    OUTPUT_NAME='scan-%Y%m%d-%H%M%S.pdf'   # strftime pattern, see date(1)
+    TRIGGER_EVENTS='request_start_scanning'
+    SCANNER=''                             # only react to this scanner address (empty: any)
+    RECONNECT_DELAY=5
+
+    NAPS2=naps2
+    NAPS2_DRIVER=sane
+    NAPS2_DEVICE=''
+    NAPS2_SOURCE=duplex
+    NAPS2_DPI=300
+    NAPS2_BITDEPTH=color
+    NAPS2_VERBOSE=yes
+    NAPS2_EXTRA_ARGS=()
+
+    AIRSCAN_URL=''                         # declare the scanner to SANE airscan directly (see below)
+    AIRSCAN_PROTOCOL=WSD
+
+    if [ -e "$CONFIG" ]; then
+        # shellcheck source=/dev/null
+        if ! . "$CONFIG"; then
+            log "error: failed to load $CONFIG"
+            return 1
+        fi
+    else
+        log "warning: $CONFIG not found, using defaults"
+    fi
+
+    local bad=0
+    [[ $RECONNECT_DELAY =~ ^[0-9]+$ ]] || { log "error: RECONNECT_DELAY must be a whole number of seconds"; bad=1; }
+    [ -z "$NAPS2_DRIVER" ] || [[ $NAPS2_DRIVER =~ ^(sane|escl|wia|twain|apple)$ ]] \
+        || { log "error: NAPS2_DRIVER must be sane, escl, wia, twain or apple"; bad=1; }
+    [ -z "$NAPS2_SOURCE" ] || [[ $NAPS2_SOURCE =~ ^(glass|feeder|duplex)$ ]] \
+        || { log "error: NAPS2_SOURCE must be glass, feeder or duplex"; bad=1; }
+    [ -z "$NAPS2_DPI" ] || [[ $NAPS2_DPI =~ ^[1-9][0-9]*$ ]] \
+        || { log "error: NAPS2_DPI must be a positive whole number"; bad=1; }
+    [ -z "$NAPS2_BITDEPTH" ] || [[ $NAPS2_BITDEPTH =~ ^(color|gray|bw)$ ]] \
+        || { log "error: NAPS2_BITDEPTH must be color, gray or bw"; bad=1; }
+    [[ $NAPS2_VERBOSE =~ ^(yes|no)$ ]] || { log "error: NAPS2_VERBOSE must be yes or no"; bad=1; }
+    [[ $(declare -p NAPS2_EXTRA_ARGS 2>/dev/null) == "declare -a"* ]] \
+        || { log "error: NAPS2_EXTRA_ARGS must be a bash array, e.g. NAPS2_EXTRA_ARGS=(--pagesize letter)"; bad=1; }
+    command -v "$NAPS2" >/dev/null || { log "error: NAPS2 command '$NAPS2' not found"; bad=1; }
+    if [ -n "$AIRSCAN_URL" ]; then
+        [[ $AIRSCAN_URL =~ ^https?://[^[:space:]\"]+$ ]] || { log "error: AIRSCAN_URL must be an http:// or https:// URL"; bad=1; }
+        [[ $AIRSCAN_PROTOCOL =~ ^(WSD|eSCL)$ ]] || { log "error: AIRSCAN_PROTOCOL must be WSD or eSCL"; bad=1; }
+        [ "$NAPS2_DRIVER" = sane ] || { log "error: AIRSCAN_URL needs NAPS2_DRIVER=sane"; bad=1; }
+        [ -n "$NAPS2_DEVICE" ] && [[ $NAPS2_DEVICE != *'"'* ]] \
+            || { log "error: AIRSCAN_URL needs NAPS2_DEVICE set (without double quotes); it names the declared device"; bad=1; }
+    fi
+    [ "$bad" -eq 0 ] || return 1
+    setup_sane || return 1
+
+    [ -n "$NAPS2_DEVICE" ] || log "warning: NAPS2_DEVICE is empty; NAPS2 will pick a device itself"
+    return 0
+}
+
+# With AIRSCAN_URL set, NAPS2 gets a private SANE configuration: only the
+# airscan backend, with this one device declared and discovery off. SANE's
+# network discovery doesn't always see the scanner in time (NAPS2 then says the
+# scanner is offline or can't be found), and hiding the epsonscan2 backend
+# means it can never be picked by mistake. The system-wide /etc/sane.d stays
+# untouched. Without AIRSCAN_URL, NAPS2 uses the system SANE configuration.
+setup_sane()
+{
+    if [ -z "$AIRSCAN_URL" ]; then
+        unset SANE_CONFIG_DIR
+        return 0
+    fi
+    local dir=${RUNTIME_DIRECTORY:-${HOME:-/tmp}/.cache/es-scan-trigger}/sane
+    if ! mkdir -p "$dir" ||
+       ! printf 'airscan\n' > "$dir/dll.conf" ||
+       ! printf '[devices]\n"%s" = %s, %s\n\n[options]\ndiscovery = disable\n' \
+            "$NAPS2_DEVICE" "$AIRSCAN_URL" "$AIRSCAN_PROTOCOL" > "$dir/airscan.conf"; then
+        log "error: cannot write the SANE configuration in $dir"
+        return 1
+    fi
+    export SANE_CONFIG_DIR=$dir
+    log "SANE: using only airscan, with \"$NAPS2_DEVICE\" at $AIRSCAN_URL ($AIRSCAN_PROTOCOL)"
+}
+
+# Prints the NAPS2 arguments for OUTPUT, NUL-separated.
+naps2_args()
+{
+    local output=$1
+    local -a args=(console --noprofile)
+    [ -n "$NAPS2_DRIVER" ]   && args+=(--driver "$NAPS2_DRIVER")
+    [ -n "$NAPS2_DEVICE" ]   && args+=(--device "$NAPS2_DEVICE")
+    [ -n "$NAPS2_SOURCE" ]   && args+=(--source "$NAPS2_SOURCE")
+    [ -n "$NAPS2_DPI" ]      && args+=(--dpi "$NAPS2_DPI")
+    [ -n "$NAPS2_BITDEPTH" ] && args+=(--bitdepth "$NAPS2_BITDEPTH")
+    [ "$NAPS2_VERBOSE" = yes ] && args+=(--verbose)
+    args+=("${NAPS2_EXTRA_ARGS[@]}" --output "$output")
+    printf '%s\0' "${args[@]}"
+}
+
+# ---- event handling ----------------------------------------------------------
+
+# Prints the event, ts and scanner fields of one JSON event line, tab-separated
+# (missing fields are empty). @tsv escapes tabs and newlines inside values, so
+# splitting on tabs is safe. Fails if the line isn't a JSON object.
+parse_event()
+{
+    jq -r 'if type == "object" then [.event, .ts, .scanner] | map(. // "" | tostring) | @tsv
+           else error("not an object") end' <<< "$1" 2>/dev/null
+}
+
+now_ts() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+# Picks an output path that doesn't exist yet: name.pdf, then name-2.pdf, ...
+next_output()
+{
+    local name stem ext='' path n=1
+    name=$(date +"$OUTPUT_NAME")
+    stem=$name
+    if [[ $name == ?*.* ]]; then
+        stem=${name%.*}
+        ext=.${name##*.}
+    fi
+    path=$OUTPUT_DIR/$name
+    while [ -e "$path" ]; do
+        n=$((n + 1))
+        path=$OUTPUT_DIR/$stem-$n$ext
+    done
+    printf '%s' "$path"
+}
+
+SCAN_PID=
+# Events stamped before this time are ignored: presses made while a scan was
+# running are queued in the socket and would otherwise start extra scans.
+BUSY_UNTIL=
+
+run_scan()
+{
+    local output rc
+    local -a args
+    if ! mkdir -p "$OUTPUT_DIR"; then
+        log "error: cannot create $OUTPUT_DIR"
+        return
+    fi
+    output=$(next_output)
+    mapfile -d '' -t args < <(naps2_args "$output")
+
+    log "scan: $NAPS2$(printf ' %q' "${args[@]}")"
+    # setsid gives NAPS2 its own process group, so shutdown() can stop it and
+    # everything it started. Its progress output goes to our log.
+    setsid "$NAPS2" "${args[@]}" >&2 &
+    SCAN_PID=$!
+    # wait is interruptible by trapped signals, so loop until NAPS2 exits.
+    while :; do
+        wait "$SCAN_PID"
+        rc=$?
+        kill -0 "$SCAN_PID" 2>/dev/null || break
+    done
+    SCAN_PID=
+    BUSY_UNTIL=$(now_ts)
+
+    # NAPS2 exits 0 even when it scanned nothing, so the file is the real test.
+    if [ -s "$output" ]; then
+        log "scan: saved $output"
+    elif [ "$rc" -ne 0 ]; then
+        log "scan: failed, NAPS2 exit status $rc"
+    else
+        log "scan: no pages scanned (is paper loaded? is the scanner reachable?), nothing saved"
+    fi
+}
+
+handle_event()
+{
+    local line=$1 fields event ts scanner trigger
+    if ! fields=$(parse_event "$line"); then
+        log "ignoring a line that isn't a JSON event: $line"
+        return
+    fi
+    IFS=$'\t' read -r event ts scanner <<< "$fields"
+    [ -n "$event" ] || return
+
+    for trigger in $TRIGGER_EVENTS; do
+        [ "$event" = "$trigger" ] || continue
+        if [ -n "$SCANNER" ] && [ "$scanner" != "$SCANNER" ]; then
+            log "ignoring $event from $scanner (SCANNER=$SCANNER)"
+            return
+        fi
+        if [ -n "$BUSY_UNTIL" ] && [[ $ts < $BUSY_UNTIL ]]; then
+            log "ignoring $event at $ts: it arrived while the previous scan was running"
+            return
+        fi
+        run_scan
+        return
+    done
+
+    case $event in
+        connected|disconnected|reconnecting) log "bridge: $event" ;;
+    esac
+}
+
+# ---- main loop ---------------------------------------------------------------
+
+SOCAT_PID=
+SLEEP_PID=
+RELOAD=0
+EXITING=0
+
+shutdown()
+{
+    EXITING=1
+    [ -n "$SCAN_PID" ] && kill -TERM -- "-$SCAN_PID" 2>/dev/null
+    local p
+    for p in "$SOCAT_PID" "$SLEEP_PID"; do
+        [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
+    done
+}
+trap shutdown TERM INT
+trap 'RELOAD=1' HUP
+
+# Reloads the config if SIGHUP asked for it. If the new file doesn't load, the
+# current settings stay. Returns 1 if the socket path changed.
+maybe_reload()
+{
+    [ "$RELOAD" -eq 1 ] || return 0
+    RELOAD=0
+    local saved old_socket=$SOCKET
+    # declare -g: a plain declare inside a function would restore the old
+    # values into locals, leaving the rejected ones in place.
+    saved=$(declare -p "${CONFIG_VARS[@]}" | sed 's/^declare /declare -g /')
+    if load_config; then
+        log "config reloaded"
+    else
+        eval "$saved"
+        log "reload failed, keeping current settings"
+    fi
+    [ "$SOCKET" = "$old_socket" ]
+}
+
+pause()
+{
+    sleep "$1" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null
+    SLEEP_PID=
+}
+
+load_config || exit 1
+log "es-scan-trigger: socket $SOCKET, triggers: $TRIGGER_EVENTS, device: ${NAPS2_DEVICE:-(NAPS2 default)}, output: $OUTPUT_DIR/$OUTPUT_NAME"
+
+waiting_logged=0
+while [ "$EXITING" -eq 0 ]; do
+    maybe_reload
+
+    if [ ! -S "$SOCKET" ]; then
+        [ "$waiting_logged" -eq 1 ] || log "waiting for $SOCKET"
+        waiting_logged=1
+        pause "$RECONNECT_DELAY"
+        continue
+    fi
+    waiting_logged=0
+
+    # A process substitution, not a coprocess: bash closes a coprocess's fds
+    # as soon as it exits, which could drop the last lines before a disconnect.
+    exec {fd}< <(exec socat -u "UNIX-CONNECT:$SOCKET" STDOUT 2>&1)
+    SOCAT_PID=$!
+    log "connected to $SOCKET"
+
+    # bash doesn't interrupt read for a trapped signal, so read with a 1 s
+    # timeout to act on SIGHUP promptly. A timeout can return part of a line;
+    # keep it and add the rest on the next read.
+    partial=
+    while [ "$EXITING" -eq 0 ]; do
+        maybe_reload || { log "socket path changed"; break; }
+        if IFS= read -r -t 1 chunk <&"$fd"; then
+            line=$partial$chunk
+            partial=
+            case $line in
+                '{'*) handle_event "$line" ;;
+                *) log "socat: $line" ;;   # socat's own messages are mixed in
+            esac
+        elif [ $? -gt 128 ]; then
+            partial+=$chunk    # timed out (or a signal arrived); nothing lost
+        else
+            break              # EOF: the bridge closed the connection
+        fi
+    done
+
+    kill -TERM "$SOCAT_PID" 2>/dev/null
+    wait "$SOCAT_PID" 2>/dev/null
+    SOCAT_PID=
+    exec {fd}<&-
+    [ "$EXITING" -eq 1 ] && break
+    log "disconnected from $SOCKET; retrying in ${RECONNECT_DELAY}s"
+    pause "$RECONNECT_DELAY"
+done
+
+log "es-scan-trigger: exiting"
+exit 0

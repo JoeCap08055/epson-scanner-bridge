@@ -7,8 +7,9 @@
 //      with es2netif's handshake: write data, semop(-1), then
 //      semtimedop(wait for 0, +1), then read _recv_result.
 //
-// It fires button_press(3), ask_is_should_prevent_timeout and
-// reserved_by_host("10.0.0.9"), then does whatever FAKE_MODE says:
+// It fires button_press(3), request_start_scanning (what a real scan button
+// sends), ask_is_should_prevent_timeout and reserved_by_host("10.0.0.9"), then
+// does whatever FAKE_MODE says:
 //   disconnect (default)  fire event_did_disconnect, then wait
 //   exit                  exit abruptly (simulates a crash)
 //   eof                   close the TCP socket, then wait
@@ -148,6 +149,7 @@ int main(int argc, char** argv)
     usleep(pause_us);
     uint8_t button = 3;
     fire(event_did_press_button, &button, 1);
+    fire(event_request_start_scanning, nullptr, 0);
     uint32_t answer = fire(ask_is_should_prevent_timeout, nullptr, 0);
     fprintf(stderr, "fake: prevent_timeout answer=%u\n", answer);
     const char host[] = "10.0.0.9";
